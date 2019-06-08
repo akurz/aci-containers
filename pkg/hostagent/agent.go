@@ -67,7 +67,8 @@ type HostAgent struct {
 	syncProcessors      map[string]func() bool
 
 	ignoreOvsPorts map[string][]string
-
+	localSnatPoduid    map[string]map[string]struct{}
+	remoteSnatPoduid    map[string]map[string]struct{}
 	netNsFuncChan chan func()
 }
 
@@ -87,6 +88,8 @@ func NewHostAgent(config *HostAgentConfig, env Environment, log *logrus.Logger) 
 		ignoreOvsPorts: make(map[string][]string),
 
 		netNsFuncChan: make(chan func()),
+		localSnatPoduid:   make(map[string]map[string]struct{}),
+		remoteSnatPoduid:   make(map[string]map[string]struct{}),
 		syncQueue: workqueue.NewNamedRateLimitingQueue(
 			&workqueue.BucketRateLimiter{
 				Bucket: ratelimit.NewBucketWithRate(float64(10), int64(10)),

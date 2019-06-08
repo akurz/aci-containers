@@ -39,9 +39,9 @@ type OpflexPortRange struct {
 	End  int `json:"end,omitempty"`
 }
 
+var Empty struct{}
 type OpflexSnatIp struct {
 	Uuid string `json:"uuid"`
-	PodUuids []string `json:"pod-uuid"`
 	InterfaceName         string `json:"interface-name,omitempty"`
 	SnatIp  string `json:"snat-ip,omitempty"`
 	InterfaceMac string   `json:"interface-mac,omitempty"`
@@ -109,7 +109,6 @@ func SnatLogger(log *logrus.Logger,  snat *snatv1.SnatAllocation) *logrus.Entry 
 func opflexSnatIpLogger(log *logrus.Logger, snatip *OpflexSnatIp) *logrus.Entry {
         return log.WithFields(logrus.Fields{
                 "uuid":      snatip.Uuid,
-                "PodUuid":   snatip.PodUuids,
 		"snat_ip":     snatip.SnatIp,
 		"mac_address": snatip.InterfaceMac,
                 "port_range": snatip.PortRange,
@@ -164,21 +163,17 @@ func (agent *HostAgent) snatDelete(obj interface{}) {
 	if opflexsnatip, ok := agent.OpflexSnatIps[snatUuid]; ok {
 		 _, ispodlocal := agent.opflexEps[snat.Spec.Poduid]
 		if ispodlocal == true {
-			for i, uuid := range opflexsnatip.PodUuids {
-				if uuid == snat.Spec.Poduid {
-					a := opflexsnatip.PodUuids
-					a[i] = a[len(a)-1] // Copy last element
-					a = a[:len(a)-1]  // truncate slice
-					opflexsnatip.PodUuids = a
-					agent.UpdateEpFile(uuid, "")
-					agent.log.Debug("POD deleted", uuid)
-				}
+			if _, ok := agent.localSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; ok {
+				delete(agent.localSnatPoduid[snat.Spec.Snatip], snat.Spec.Poduid)
+				agent.UpdateEpFile(snat.Spec.Poduid, "")
+				agent.log.Debug("POD deleted", snat.Spec.Poduid)
 			}
-			if len(opflexsnatip.PodUuids) == 0 {
+			if len(agent.localSnatPoduid[snat.Spec.Snatip]) == 0 {
 				opflexsnatip.Local = false
 			}
 		} else  {
-			// This code needs to be revisited foe each nodeMAC maintain more than one port
+			// for now ip+port_range is unique for a node so one mac+port-range exists.
+			// Need to re visit this code  more than one port-range for the same ip+node is maintained 
 			for i, v := range opflexsnatip.Remote {
 				if  v.MacAddress == snat.Spec.Macaddress  &&
 				v.PortRange[0].Start == snat.Spec.Snatportrange.Start &&
@@ -189,19 +184,32 @@ func (agent *HostAgent) snatDelete(obj interface{}) {
 						a = a[:len(a)-1]
 						opflexsnatip.Remote = a
 						agent.log.Debug("POD remoteInfo deleted",  v)
+						if _, ok := agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; ok {
+							delete(agent.remoteSnatPoduid[snat.Spec.Snatip], snat.Spec.Poduid)
+							agent.log.Debug("POD remoteInfo deleted",  v)
+						}
 					} else {
-						opflexsnatip.Remote[i].Refcount = v.Refcount-1;
-						agent.log.Debug("POD remoteInfo ref decrimented",  v)
+						if _, ok := agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; ok {
+							delete(agent.remoteSnatPoduid[snat.Spec.Snatip], snat.Spec.Poduid)
+							opflexsnatip.Remote[i].Refcount = v.Refcount-1;
+							agent.log.Debug("POD remoteInfo ref decrimented",  v)
+						}
 					}
 				}
 			}
 		}
-		if len(opflexsnatip.PodUuids) == 0 &&  len(opflexsnatip.Remote) == 0 {
+		agent.log.Debug("total local Uuid:",  len(agent.localSnatPoduid[snat.Spec.Snatip]))
+		agent.log.Debug("total remote Uuid:",  len(agent.remoteSnatPoduid[snat.Spec.Snatip]))
+		if len(agent.localSnatPoduid[snat.Spec.Snatip]) == 0 &&
+			len(agent.remoteSnatPoduid[snat.Spec.Snatip]) == 0 {
+			agent.log.Debug("Snat IP Mark for delete:",
+					len(agent.localSnatPoduid[snat.Spec.Snatip]))
 			markdelete = true;
 		}
 	}
 	if markdelete == true {
 		agent.snatIpDeleted(&snatUuid)
+		delete(agent.localSnatPoduid, snat.Spec.Snatip)
 	} else {
 		agent.scheduleSyncSnats()
 	}
@@ -233,6 +241,7 @@ func (agent *HostAgent) doUpdateSnat(key string) {
 
 func (agent *HostAgent) snatChanged(snatobj interface{}, logger *logrus.Entry) {
 	snat  := snatobj.(*snatv1.SnatAllocation)
+	podset := false
 	snatUuid := snat.Spec.Snatipuid
 	if logger == nil {
 		logger = agent.log.WithFields(logrus.Fields{})
@@ -242,44 +251,38 @@ func (agent *HostAgent) snatChanged(snatobj interface{}, logger *logrus.Entry) {
 	existing, ok := agent.OpflexSnatIps[snatUuid]
 	remoteinfo := make([]OpflexSnatIpRemoteInfo, 0)
 	var snatip *OpflexSnatIp
-	podset := false
 	if ispodlocal {
-		poduuids := make([]string, 0)
 		if ok {
-			for _, uuid := range existing.PodUuids {
-				if  uuid == snat.Spec.Poduid {
-					podset = true;
-				}
-				poduuids = append(poduuids, uuid)
-			}
 			remoteinfo = existing.Remote
-		}
-		if podset == false {
-
-			poduuids = append(poduuids, snat.Spec.Poduid)
 		}
 		portrange := make([]OpflexPortRange, 0)
 		portrange = append (portrange, OpflexPortRange { Start: snat.Spec.Snatportrange.Start,
                                                     End: snat.Spec.Snatportrange.End,})
-
-		agent.log.Debug(poduuids)
 		snatip = &OpflexSnatIp {
 			Uuid: snatUuid,
 			InterfaceName: agent.config.UplinkIface,
 			InterfaceMac: snat.Spec.Macaddress,
 			SnatIp: snat.Spec.Snatip,
-			PodUuids: poduuids,
 			Local: ispodlocal,
 			PortRange: portrange,
 			InterfaceVlan: agent.config.ServiceVlan,
 			Remote: remoteinfo,
+		}
+		if _, ok := agent.localSnatPoduid[snatip.SnatIp]; !ok {
+			agent.localSnatPoduid[snatip.SnatIp] = make(map[string]struct{})
+			agent.localSnatPoduid[snatip.SnatIp][snat.Spec.Poduid] = Empty;
+		} else {
+			if _, ok := agent.localSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; !ok  {
+				// new pod is added for snaip
+				podset = true
+				agent.localSnatPoduid[snatip.SnatIp][snat.Spec.Poduid] = Empty;
+			}
 		}
 		logger.Debug("Pod is local...")
 	} else  {
 		var remote OpflexSnatIpRemoteInfo
 		var macAdress  string
 		var snat_ipaddr     string
-		poduuids :=  make([]string, 0)
 		portrange := make([]OpflexPortRange, 0)
 		var  local bool
 		remote.MacAddress = snat.Spec.Macaddress
@@ -287,7 +290,6 @@ func (agent *HostAgent) snatChanged(snatobj interface{}, logger *logrus.Entry) {
 			remoteinfo = existing.Remote
 			macAdress = existing.InterfaceMac
 			snat_ipaddr = existing.SnatIp
-			poduuids = existing.PodUuids
 			local = existing.Local
 			portrange = existing.PortRange
 		} else {
@@ -302,18 +304,28 @@ func (agent *HostAgent) snatChanged(snatobj interface{}, logger *logrus.Entry) {
 				for _, p := range v.PortRange {
 					if p.Start == snat.Spec.Snatportrange.Start &&
 						p.End == snat.Spec.Snatportrange.End {
-						remoteinfo[i].Refcount++
+						if _, ok := agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; !ok {
+							agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid] = Empty
+							remoteinfo[i].Refcount++
+						}
 						remoteexists = true
 						break;
 					}
 				}
 			}
 		}
-		// for now it is only one port range is added MAC+Port_range is unique.
-		// Need to visit this code once if it is more than one port-range for the same node is maintained 
+		// for now ip+port_range is unique for a node so one mac+port-range exists.
+		// Need to re visit this code  more than one port-range for the same ip+node is maintained 
 		if remoteexists == false {
-			remoteport = append(remoteport, OpflexPortRange { Start: snat.Spec.Snatportrange.Start,
-                                                    End: snat.Spec.Snatportrange.End,})
+			remoteport = append(remoteport,
+					OpflexPortRange { Start: snat.Spec.Snatportrange.Start,
+					End: snat.Spec.Snatportrange.End,})
+			if _, ok := agent.remoteSnatPoduid[snat.Spec.Snatip]; !ok {
+				agent.remoteSnatPoduid[snat.Spec.Snatip] = make(map[string]struct{})
+				agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid] = Empty;
+			} else {
+				agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid] = Empty;
+			}
 			remote.Refcount++
 			remote.PortRange = remoteport
 			remoteinfo = append(remoteinfo, remote)
@@ -324,7 +336,6 @@ func (agent *HostAgent) snatChanged(snatobj interface{}, logger *logrus.Entry) {
 			InterfaceName: agent.config.UplinkIface,
 			InterfaceMac: macAdress,
 			SnatIp: snat_ipaddr,
-			PodUuids: poduuids,
 			Local: local,
 			PortRange:portrange,
 			InterfaceVlan: agent.config.ServiceVlan,
@@ -334,6 +345,8 @@ func (agent *HostAgent) snatChanged(snatobj interface{}, logger *logrus.Entry) {
 	}
 	if (ok && !reflect.DeepEqual(existing, snatip)) || !ok {
 		agent.OpflexSnatIps[snatUuid] = snatip
+		agent.scheduleSyncSnats()
+	} else if  podset == true {
 		agent.scheduleSyncSnats()
 	}
 }
@@ -378,7 +391,7 @@ func (agent *HostAgent) syncSnat() bool {
 			} else if wrote {
 				opflexSnatIpLogger(agent.log, existing).Info("Updated snat")
 			}
-			for _, poduuid := range opflexSnatIps[uuid].PodUuids {
+			for poduuid, _ := range agent.localSnatPoduid[existing.SnatIp] {
 				agent.UpdateEpFile(poduuid, existing.SnatIp)
 			}
 			seen[uuid] = true
@@ -400,7 +413,7 @@ func (agent *HostAgent) syncSnat() bool {
 			opflexSnatIpLogger(agent.log, snat).
 				Error("Error writing snat file: ", err)
 		}
-		for _, poduuid := range snat.PodUuids {
+		for poduuid, _ := range agent.localSnatPoduid[snat.SnatIp] {
 			agent.UpdateEpFile(poduuid, snat.SnatIp)
 		}
 	}
