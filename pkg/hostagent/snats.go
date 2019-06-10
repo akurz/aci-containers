@@ -197,6 +197,12 @@ func (agent *HostAgent) snatDelete(obj interface{}) {
 					}
 				}
 			}
+			// if no remote nodes check any stale for uuid then mark the file for delete
+			if _, ok := agent.localSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; ok {
+				delete(agent.localSnatPoduid[snat.Spec.Snatip], snat.Spec.Poduid)
+				agent.log.Debug("Stale Pod uuid deleted", snat.Spec.Poduid)
+				opflexsnatip.Local = false
+			}
 		}
 		agent.log.Debug("total local Uuid:",  len(agent.localSnatPoduid[snat.Spec.Snatip]))
 		agent.log.Debug("total remote Uuid:",  len(agent.remoteSnatPoduid[snat.Spec.Snatip]))

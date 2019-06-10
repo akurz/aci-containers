@@ -110,8 +110,18 @@ func (agent *HostAgent) discoverHostConfig() (conf *HostAgentNodeConfig) {
 			conf.UplinkIface = parent.Attrs().Name
 			conf.VxlanAnycastIp = anycast.String()
 			conf.OpflexPeerIp = peerIp.String()
+			intf, err := net.InterfaceByName(conf.UplinkIface)
+			if err == nil {
+				conf.UplinkMacAdress = conf.UplinkIface
+				agent.log.Info("Hardware address is ", intf.HardwareAddr)
+			}
 			return
 		}
+	}
+	intf, err := net.InterfaceByName(conf.UplinkIface)
+	if err == nil {
+		conf.UplinkMacAdress = conf.UplinkIface
+		agent.log.Info("Hardware address is ", intf.HardwareAddr)
 	}
 
 	agent.log.WithFields(logrus.Fields{"vlan": agent.config.AciInfraVlan}).

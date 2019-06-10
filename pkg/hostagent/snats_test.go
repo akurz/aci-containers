@@ -17,7 +17,6 @@ package hostagent
 import (
 	"encoding/json"
 	"io/ioutil"
-	//"net"
 	"os"
 	"path/filepath"
 	"testing"

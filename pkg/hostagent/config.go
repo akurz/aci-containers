@@ -61,6 +61,8 @@ type HostAgentNodeConfig struct {
 
 	// Anycast IP used for OpFlex communication
 	OpflexPeerIp string `json:"opflex-peer-ip,omitempty"`
+	// Uplink Mac adress
+	UplinkMacAdress string `json:"uplink mac_adress,omitempty"`
 }
 
 // Configuration for the host agent
