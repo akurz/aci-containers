@@ -12,62 +12,92 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Handlers for pod updates.  Pods map to opflex endpoints
+// Handlers for snat updates.
 
 package hostagent
 
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Sirupsen/logrus"
+	snatglobal "github.com/noironetworks/aci-containers/pkg/snatglobalinfo/apis/aci.snat/v1"
+	snatglobalclset "github.com/noironetworks/aci-containers/pkg/snatglobalinfo/clientset/versioned"
+	snatlocal "github.com/noironetworks/aci-containers/pkg/snatlocalinfo/apis/aci.snat/v1"
+	snatlocalclset "github.com/noironetworks/aci-containers/pkg/snatlocalinfo/clientset/versioned"
 	"io/ioutil"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/kubernetes/pkg/controller"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
-	"github.com/Sirupsen/logrus"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/tools/cache"
-
-	"k8s.io/kubernetes/pkg/controller"
-	snatv1  "github.com/noironetworks/aci-containers/pkg/snatallocation/apis/aci.snat/v1"
-	snatclientset "github.com/noironetworks/aci-containers/pkg/snatallocation/clientset/versioned"
 )
+
 type OpflexPortRange struct {
 	Start int `json:"start,omitempty"`
-	End  int `json:"end,omitempty"`
+	End   int `json:"end,omitempty"`
 }
 
-var Empty struct{}
 type OpflexSnatIp struct {
-	Uuid string `json:"uuid"`
-	InterfaceName         string `json:"interface-name,omitempty"`
-	SnatIp  string `json:"snat-ip,omitempty"`
-	InterfaceMac string   `json:"interface-mac,omitempty"`
-        Local bool          `json:"local,omitempty"`
-	DestIpAddress  string `json:"destip-dddress,omitempty"`
-	DestPrefix     uint16  `json:"dest-prefix,omitempty"`
-	PortRange      []OpflexPortRange  `json:"port-range,omitempty"`
-	InterfaceVlan uint `json:"interface-vlan,omitempty"`
-	Remote  []OpflexSnatIpRemoteInfo `json:"remote,omitempty"`
+	Uuid          string                   `json:"uuid"`
+	InterfaceName string                   `json:"interface-name,omitempty"`
+	SnatIp        string                   `json:"snat-ip,omitempty"`
+	InterfaceMac  string                   `json:"interface-mac,omitempty"`
+	Local         bool                     `json:"local,omitempty"`
+	DestIpAddress string                   `json:"destip-dddress,omitempty"`
+	DestPrefix    uint16                   `json:"dest-prefix,omitempty"`
+	PortRange     []OpflexPortRange        `json:"port-range,omitempty"`
+	InterfaceVlan uint                     `json:"interface-vlan,omitempty"`
+	Remote        []OpflexSnatIpRemoteInfo `json:"remote,omitempty"`
+}
+type OpflexSnatIpRemoteInfo struct {
+	NodeIp     string            `json:"snat_ip,omitempty"`
+	MacAddress string            `json:"mac,omitempty"`
+	PortRange  []OpflexPortRange `json:"port-range,omitempty"`
+	Refcount   int               `json:"ref,omitempty"`
+}
+type OpflexSnatGlobalInfo struct {
+	SnatIp     string
+	MacAddress string
+	PortRange  []OpflexPortRange
+	SnatIpUid  string
+	Protocols  []string
 }
 
-type OpflexSnatIpRemoteInfo struct {
-	NodeIp  string `json:"snat_ip,omitempty"`
-	MacAddress string   `json:"mac,omitempty"`
-	PortRange   []OpflexPortRange  `json:"port-range,omitempty"`
-	Refcount int
+type OpflexSnatLocalInfo struct {
+	SnatIp     string
+	MarkDelete bool
 }
-func (agent *HostAgent) initSnatInformerFromClient(
-	snatClient *snatclientset.Clientset) {
-	agent.initSnatInformerBase(
+
+func (agent *HostAgent) initSnatLocalInformerFromClient(
+	snatClient *snatlocalclset.Clientset) {
+	agent.initSnatLocalInformerBase(
 		&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-				return snatClient.AciV1().SnatAllocations(metav1.NamespaceAll).List(options)
+				options.FieldSelector =
+					fields.Set{"metadata.name": agent.config.NodeName}.String()
+				return snatClient.AciV1().SnatLocalInfos(metav1.NamespaceAll).List(options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-				return snatClient.AciV1().SnatAllocations(metav1.NamespaceAll).Watch(options)
+				options.FieldSelector =
+					fields.Set{"metadata.name": agent.config.NodeName}.String()
+				return snatClient.AciV1().SnatLocalInfos(metav1.NamespaceAll).Watch(options)
+			},
+		})
+}
+func (agent *HostAgent) initSnatGlobalInformerFromClient(
+	snatClient *snatglobalclset.Clientset) {
+	agent.initSnatGlobalInformerBase(
+		&cache.ListWatch{
+			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+				return snatClient.AciV1().SnatGlobalInfos(metav1.NamespaceAll).List(options)
+			},
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				return snatClient.AciV1().SnatGlobalInfos(metav1.NamespaceAll).Watch(options)
 			},
 		})
 }
@@ -98,275 +128,286 @@ func (agent *HostAgent) FormSnatFilePath(uuid string) string {
 	return filepath.Join(agent.config.OpFlexSnatDir, uuid+".snat")
 }
 
-func SnatLogger(log *logrus.Logger,  snat *snatv1.SnatAllocation) *logrus.Entry {
-        return log.WithFields(logrus.Fields{
-                "namespace": snat.ObjectMeta.Namespace,
-                "name":      snat.ObjectMeta.Name,
+func SnatLocalInfoLogger(log *logrus.Logger, snat *snatlocal.SnatLocalInfo) *logrus.Entry {
+	return log.WithFields(logrus.Fields{
+		"namespace": snat.ObjectMeta.Namespace,
+		"name":      snat.ObjectMeta.Name,
 		"spec":      snat.Spec,
-        })
+	})
+}
+
+func SnatGlobalInfoLogger(log *logrus.Logger, snat *snatglobal.SnatGlobalInfo) *logrus.Entry {
+	return log.WithFields(logrus.Fields{
+		"namespace": snat.ObjectMeta.Namespace,
+		"name":      snat.ObjectMeta.Name,
+		"spec":      snat.Spec,
+	})
 }
 
 func opflexSnatIpLogger(log *logrus.Logger, snatip *OpflexSnatIp) *logrus.Entry {
-        return log.WithFields(logrus.Fields{
-                "uuid":      snatip.Uuid,
-		"snat_ip":     snatip.SnatIp,
-		"mac_address": snatip.InterfaceMac,
-                "port_range": snatip.PortRange,
-		"local":      snatip.Local,
+	return log.WithFields(logrus.Fields{
+		"uuid":           snatip.Uuid,
+		"snat_ip":        snatip.SnatIp,
+		"mac_address":    snatip.InterfaceMac,
+		"port_range":     snatip.PortRange,
+		"local":          snatip.Local,
 		"interface-name": snatip.InterfaceName,
 		"interfcae-vlan": snatip.InterfaceVlan,
-        })
+		"remote":         snatip.Remote,
+	})
 }
 
-func (agent *HostAgent) initSnatInformerBase(listWatch *cache.ListWatch) {
-	agent.snatInformer = cache.NewSharedIndexInformer(
+func (agent *HostAgent) initSnatLocalInformerBase(listWatch *cache.ListWatch) {
+	agent.snatLocalInformer = cache.NewSharedIndexInformer(
 		listWatch,
-		&snatv1.SnatAllocation{},
+		&snatlocal.SnatLocalInfo{},
 		controller.NoResyncPeriodFunc(),
 		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 	)
-	agent.snatInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	agent.snatLocalInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			agent.snatUpdate(obj)
+			agent.snatLocalInfoUpdate(obj)
 		},
 		UpdateFunc: func(_ interface{}, obj interface{}) {
-			agent.snatUpdate(obj)
+			agent.snatLocalInfoUpdate(obj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			agent.snatDelete(obj)
+			agent.snatLocalInfoDelete(obj)
 		},
 	})
-	agent.log.Debug("Initializing Snat Informers")
+	agent.log.Debug("Initializing Snat Local info Informers")
 }
 
-func (agent *HostAgent) snatUpdate(obj interface{}) {
+func (agent *HostAgent) initSnatGlobalInformerBase(listWatch *cache.ListWatch) {
+	agent.snatGlobalInformer = cache.NewSharedIndexInformer(
+		listWatch,
+		&snatglobal.SnatGlobalInfo{},
+		controller.NoResyncPeriodFunc(),
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+	)
+	agent.snatGlobalInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			agent.snatGlobalInfoUpdate(obj)
+		},
+		UpdateFunc: func(_ interface{}, obj interface{}) {
+			agent.snatGlobalInfoUpdate(obj)
+		},
+		DeleteFunc: func(obj interface{}) {
+			agent.snatGlobalInfoDelete(obj)
+		},
+	})
+	agent.log.Debug("Initializing SnatGlobal Info Informers")
+}
+
+func (agent *HostAgent) snatLocalInfoUpdate(obj interface{}) {
 	agent.indexMutex.Lock()
-        defer agent.indexMutex.Unlock()
-	snat := obj.(*snatv1.SnatAllocation)
+	defer agent.indexMutex.Unlock()
+	snat := obj.(*snatlocal.SnatLocalInfo)
 	key, err := cache.MetaNamespaceKeyFunc(snat)
-        if err != nil {
-                SnatLogger(agent.log, snat).
-                        Error("Could not create key:" + err.Error())
-                return
-        }
-	//agent.log.Info("Snat Object added ", snat)
-	agent.doUpdateSnat(key);
-}
-
-func (agent *HostAgent) snatDelete(obj interface{}) {
-	agent.log.Debug("Snat Delete Obj")
-	agent.indexMutex.Lock()
-	markdelete := false
-        defer agent.indexMutex.Unlock()
-	snat := obj.(*snatv1.SnatAllocation)
-	snatUuid := snat.Spec.Snatipuid
-	if opflexsnatip, ok := agent.OpflexSnatIps[snatUuid]; ok {
-		 _, ispodlocal := agent.opflexEps[snat.Spec.Poduid]
-		if ispodlocal == true {
-			if _, ok := agent.localSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; ok {
-				delete(agent.localSnatPoduid[snat.Spec.Snatip], snat.Spec.Poduid)
-				agent.UpdateEpFile(snat.Spec.Poduid, "")
-				agent.log.Debug("POD deleted", snat.Spec.Poduid)
-			}
-			if len(agent.localSnatPoduid[snat.Spec.Snatip]) == 0 {
-				opflexsnatip.Local = false
-			}
-		} else  {
-			// for now ip+port_range is unique for a node so one mac+port-range exists.
-			// Need to re visit this code  more than one port-range for the same ip+node is maintained 
-			for i, v := range opflexsnatip.Remote {
-				if  v.MacAddress == snat.Spec.Macaddress  &&
-				v.PortRange[0].Start == snat.Spec.Snatportrange.Start &&
-				v.PortRange[0].End == snat.Spec.Snatportrange.End {
-					if (v.Refcount == 1) {
-						a := opflexsnatip.Remote
-						a[i] = a[len(a)-1]
-						a = a[:len(a)-1]
-						opflexsnatip.Remote = a
-						agent.log.Debug("POD remoteInfo deleted",  v)
-						if _, ok := agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; ok {
-							delete(agent.remoteSnatPoduid[snat.Spec.Snatip], snat.Spec.Poduid)
-							agent.log.Debug("POD remoteInfo deleted",  v)
-						}
-					} else {
-						if _, ok := agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; ok {
-							delete(agent.remoteSnatPoduid[snat.Spec.Snatip], snat.Spec.Poduid)
-							opflexsnatip.Remote[i].Refcount = v.Refcount-1;
-							agent.log.Debug("POD remoteInfo ref decrimented",  v)
-						}
-					}
-				}
-			}
-			// if no remote nodes check any stale for uuid then mark the file for delete
-			if _, ok := agent.localSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; ok {
-				delete(agent.localSnatPoduid[snat.Spec.Snatip], snat.Spec.Poduid)
-				agent.log.Debug("Stale Pod uuid deleted", snat.Spec.Poduid)
-				opflexsnatip.Local = false
-			}
-		}
-		agent.log.Debug("total local Uuid:",  len(agent.localSnatPoduid[snat.Spec.Snatip]))
-		agent.log.Debug("total remote Uuid:",  len(agent.remoteSnatPoduid[snat.Spec.Snatip]))
-		if len(agent.localSnatPoduid[snat.Spec.Snatip]) == 0 &&
-			len(agent.remoteSnatPoduid[snat.Spec.Snatip]) == 0 {
-			agent.log.Debug("Snat IP Mark for delete:",
-					len(agent.localSnatPoduid[snat.Spec.Snatip]))
-			markdelete = true;
-		}
-	}
-	if markdelete == true {
-		agent.snatIpDeleted(&snatUuid)
-		delete(agent.localSnatPoduid, snat.Spec.Snatip)
-	} else {
-		agent.scheduleSyncSnats()
-	}
-}
-
-func (agent *HostAgent) snatIpDeleted(snatUuid *string) {
-	if _, ok := agent.OpflexSnatIps[*snatUuid]; ok {
-		delete(agent.OpflexSnatIps, *snatUuid)
-		agent.scheduleSyncSnats()
-	}
-}
-
-
-func (agent *HostAgent) doUpdateSnat(key string) {
-        snatobj, exists, err :=
-                agent.snatInformer.GetStore().GetByKey(key)
 	if err != nil {
-                agent.log.Error("Could not lookup snat for " +
-                        key + ": " + err.Error())
-                return
-        }
-        if !exists || snatobj == nil {
-                return
-        }
-	snat  := snatobj.(*snatv1.SnatAllocation)
-	logger := SnatLogger(agent.log, snat)
-	agent.snatChanged(snatobj, logger)
+		SnatLocalInfoLogger(agent.log, snat).
+			Error("Could not create key:" + err.Error())
+		return
+	}
+	agent.log.Info("Snat Local Object added/Updated ", snat)
+	agent.doUpdateSnatLocalInfo(key)
 }
 
-func (agent *HostAgent) snatChanged(snatobj interface{}, logger *logrus.Entry) {
-	snat  := snatobj.(*snatv1.SnatAllocation)
-	podset := false
-	snatUuid := snat.Spec.Snatipuid
+func (agent *HostAgent) snatGlobalInfoUpdate(obj interface{}) {
+	agent.indexMutex.Lock()
+	defer agent.indexMutex.Unlock()
+	snat := obj.(*snatglobal.SnatGlobalInfo)
+	key, err := cache.MetaNamespaceKeyFunc(snat)
+	if err != nil {
+		SnatGlobalInfoLogger(agent.log, snat).
+			Error("Could not create key:" + err.Error())
+		return
+	}
+	agent.log.Info("Snat Local Object added/Updated ", snat)
+	agent.doUpdateSnatGlobalInfo(key)
+}
+
+func (agent *HostAgent) doUpdateSnatLocalInfo(key string) {
+	snatobj, exists, err :=
+		agent.snatLocalInformer.GetStore().GetByKey(key)
+	if err != nil {
+		agent.log.Error("Could not lookup snat for " +
+			key + ": " + err.Error())
+		return
+	}
+	if !exists || snatobj == nil {
+		return
+	}
+	snat := snatobj.(*snatlocal.SnatLocalInfo)
+	logger := SnatLocalInfoLogger(agent.log, snat)
+	agent.snatLocalInfoChanged(snatobj, logger)
+}
+
+func (agent *HostAgent) snatLocalInfoChanged(snatobj interface{}, logger *logrus.Entry) {
+	snat := snatobj.(*snatlocal.SnatLocalInfo)
 	if logger == nil {
 		logger = agent.log.WithFields(logrus.Fields{})
 	}
-	logger.Debug("SnatChanged...")
-	_, ispodlocal := agent.opflexEps[snat.Spec.Poduid]
-	existing, ok := agent.OpflexSnatIps[snatUuid]
-	remoteinfo := make([]OpflexSnatIpRemoteInfo, 0)
-	var snatip *OpflexSnatIp
-	if ispodlocal {
-		if ok {
-			remoteinfo = existing.Remote
-		}
-		portrange := make([]OpflexPortRange, 0)
-		portrange = append (portrange, OpflexPortRange { Start: snat.Spec.Snatportrange.Start,
-                                                    End: snat.Spec.Snatportrange.End,})
-		snatip = &OpflexSnatIp {
-			Uuid: snatUuid,
-			InterfaceName: agent.config.UplinkIface,
-			InterfaceMac: snat.Spec.Macaddress,
-			SnatIp: snat.Spec.Snatip,
-			Local: ispodlocal,
-			PortRange: portrange,
-			InterfaceVlan: agent.config.ServiceVlan,
-			Remote: remoteinfo,
-		}
-		if _, ok := agent.localSnatPoduid[snatip.SnatIp]; !ok {
-			agent.localSnatPoduid[snatip.SnatIp] = make(map[string]struct{})
-			agent.localSnatPoduid[snatip.SnatIp][snat.Spec.Poduid] = Empty;
-		} else {
-			if _, ok := agent.localSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; !ok  {
-				// new pod is added for snaip
-				podset = true
-				agent.localSnatPoduid[snatip.SnatIp][snat.Spec.Poduid] = Empty;
+	logger.Debug("Snat local info Changed...")
+	localInfo := snat.Spec.LocalInfos
+	syncep := false
+	// This case is true when scope moves from namespace to deployment
+	if len(localInfo) < len(agent.opflexSnatLocalInfos) {
+		for poduid, v := range agent.opflexSnatLocalInfos {
+			if _, ok := localInfo[poduid]; !ok {
+				v.MarkDelete = true
+				syncep = true
 			}
 		}
-		logger.Debug("Pod is local...")
-	} else  {
-		var remote OpflexSnatIpRemoteInfo
-		var macAdress  string
-		var snat_ipaddr     string
-		portrange := make([]OpflexPortRange, 0)
-		var  local bool
-		remote.MacAddress = snat.Spec.Macaddress
-		if ok {
-			remoteinfo = existing.Remote
-			macAdress = existing.InterfaceMac
-			snat_ipaddr = existing.SnatIp
-			local = existing.Local
-			portrange = existing.PortRange
-		} else {
-			snat_ipaddr = snat.Spec.Snatip
-			local = false
-		}
-		agent.log.Debug("existing.Remote", remoteinfo)
-		remoteexists := false
-		remoteport := make([]OpflexPortRange, 0)
-		for i, v := range remoteinfo {
-			if  v.MacAddress == remote.MacAddress {
-				for _, p := range v.PortRange {
-					if p.Start == snat.Spec.Snatportrange.Start &&
-						p.End == snat.Spec.Snatportrange.End {
-						if _, ok := agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid]; !ok {
-							agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid] = Empty
-							remoteinfo[i].Refcount++
-						}
-						remoteexists = true
-						break;
-					}
-				}
-			}
-		}
-		// for now ip+port_range is unique for a node so one mac+port-range exists.
-		// Need to re visit this code  more than one port-range for the same ip+node is maintained 
-		if remoteexists == false {
-			remoteport = append(remoteport,
-					OpflexPortRange { Start: snat.Spec.Snatportrange.Start,
-					End: snat.Spec.Snatportrange.End,})
-			if _, ok := agent.remoteSnatPoduid[snat.Spec.Snatip]; !ok {
-				agent.remoteSnatPoduid[snat.Spec.Snatip] = make(map[string]struct{})
-				agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid] = Empty;
-			} else {
-				agent.remoteSnatPoduid[snat.Spec.Snatip][snat.Spec.Poduid] = Empty;
-			}
-			remote.Refcount++
-			remote.PortRange = remoteport
-			remoteinfo = append(remoteinfo, remote)
-		}
-		agent.log.Debug("Remote Info", remoteinfo)
-		snatip = &OpflexSnatIp {
-			Uuid: snatUuid,
-			InterfaceName: agent.config.UplinkIface,
-			InterfaceMac: macAdress,
-			SnatIp: snat_ipaddr,
-			Local: local,
-			PortRange:portrange,
-			InterfaceVlan: agent.config.ServiceVlan,
-			Remote: remoteinfo,
-		}
-		logger.Debug("Pod is remote...")
 	}
-	if (ok && !reflect.DeepEqual(existing, snatip)) || !ok {
-		agent.OpflexSnatIps[snatUuid] = snatip
-		agent.scheduleSyncSnats()
-	} else if  podset == true {
+	for poduid, v := range localInfo {
+		localInfo := &OpflexSnatLocalInfo{
+			SnatIp:     v.SnatIp,
+			MarkDelete: false,
+		}
+		if _, ok := agent.opflexSnatLocalInfos[poduid]; !ok {
+			agent.opflexSnatLocalInfos[poduid] = localInfo
+			syncep = true
+		} else if agent.opflexSnatLocalInfos[poduid] != localInfo {
+			agent.opflexSnatLocalInfos[poduid] = localInfo
+			syncep = true
+		}
+	}
+	if syncep {
+		agent.scheduleSyncEps()
+	}
+}
+
+func (agent *HostAgent) doUpdateSnatGlobalInfo(key string) {
+	snatobj, exists, err :=
+		agent.snatGlobalInformer.GetStore().GetByKey(key)
+	if err != nil {
+		agent.log.Error("Could not lookup snat for " +
+			key + ": " + err.Error())
+		return
+	}
+	if !exists || snatobj == nil {
+		return
+	}
+	snat := snatobj.(*snatglobal.SnatGlobalInfo)
+	logger := SnatGlobalInfoLogger(agent.log, snat)
+	agent.snaGlobalInfoChanged(snatobj, logger)
+}
+
+func (agent *HostAgent) snaGlobalInfoChanged(snatobj interface{}, logger *logrus.Entry) {
+	snat := snatobj.(*snatglobal.SnatGlobalInfo)
+	syncSnat := false
+	if logger == nil {
+		logger = agent.log.WithFields(logrus.Fields{})
+	}
+	logger.Debug("Snat Global info Changed...")
+	globalInfo := snat.Spec.GlobalInfos
+	// This case is possible when all the pods will be deleted from that node
+	if len(globalInfo) < len(agent.opflexSnatGlobalInfos) {
+		for nodename, _ := range agent.opflexSnatGlobalInfos {
+			if _, ok := globalInfo[nodename]; !ok {
+				delete(agent.opflexSnatGlobalInfos, nodename)
+				syncSnat = true
+			}
+		}
+	}
+	agent.log.Debug("Snat Gobal Obj Map: ", globalInfo)
+	for nodename, val := range globalInfo {
+		var newglobalinfos []*OpflexSnatGlobalInfo
+		for _, v := range val {
+			portrange := make([]OpflexPortRange, 1)
+			portrange[0].Start = v.PortRanges[0].Start
+			portrange[0].End = v.PortRanges[0].End
+			nodeInfo := &OpflexSnatGlobalInfo{
+				SnatIp:     v.SnatIp,
+				MacAddress: v.MacAddress,
+				PortRange:  portrange,
+				SnatIpUid:  v.SnatIpUid,
+				Protocols:  v.Protocols,
+			}
+			newglobalinfos = append(newglobalinfos, nodeInfo)
+		}
+		existing, ok := agent.opflexSnatGlobalInfos[nodename]
+		if (ok && !reflect.DeepEqual(existing, newglobalinfos)) || !ok {
+			agent.opflexSnatGlobalInfos[nodename] = newglobalinfos
+			syncSnat = true
+		}
+	}
+	agent.log.Debug("Snat Gobal Obj Map: ", agent.opflexSnatGlobalInfos)
+	if syncSnat {
 		agent.scheduleSyncSnats()
 	}
+}
+func (agent *HostAgent) snatLocalInfoDelete(obj interface{}) {
+	agent.log.Debug("Snat Delete Obj")
+	snat := obj.(*snatlocal.SnatLocalInfo)
+	localInfo := snat.Spec.LocalInfos
+	for poduid, _ := range localInfo {
+		if _, ok := agent.opflexSnatLocalInfos[poduid]; ok {
+			agent.opflexSnatLocalInfos[poduid].MarkDelete = true
+		}
+	}
+	agent.scheduleSyncEps()
+}
+
+func (agent *HostAgent) snatGlobalInfoDelete(obj interface{}) {
+	agent.log.Debug("Snat Delete Obj")
+	snat := obj.(*snatglobal.SnatGlobalInfo)
+	globalInfo := snat.Spec.GlobalInfos
+	for snatip, _ := range globalInfo {
+		if _, ok := agent.opflexSnatGlobalInfos[snatip]; ok {
+			delete(agent.opflexSnatGlobalInfos, snatip)
+		}
+	}
+	agent.scheduleSyncSnats()
 }
 
 func (agent *HostAgent) syncSnat() bool {
 	if !agent.syncEnabled {
 		return false
 	}
-
 	agent.log.Debug("Syncing snats")
 	agent.indexMutex.Lock()
 	opflexSnatIps := make(map[string]*OpflexSnatIp)
-	for k, v := range agent.OpflexSnatIps {
-		opflexSnatIps[k] = v
+	remoteinfo := make([]OpflexSnatIpRemoteInfo, 0)
+	local := make(map[string]bool)
+	//set all the local SnatIp's
+	for _, v := range agent.opflexSnatLocalInfos {
+		local[v.SnatIp] = true
+	}
+	// get the latest remote info
+	for nodename, v := range agent.opflexSnatGlobalInfos {
+		for _, ginfo := range v {
+			if nodename != agent.config.NodeName {
+				var remote OpflexSnatIpRemoteInfo
+				remote.MacAddress = ginfo.MacAddress
+				remote.PortRange = ginfo.PortRange
+				remoteinfo = append(remoteinfo, remote)
+			}
+		}
+	}
+	agent.log.Debug("Remte Info: ", remoteinfo)
+	// set the Opflex Snat IP information
+	var localportrange []OpflexPortRange
+	for nodename, v := range agent.opflexSnatGlobalInfos {
+		for _, ginfo := range v {
+			var snatinfo OpflexSnatIp
+			// set the local portrange
+			if nodename == agent.config.NodeName && local[ginfo.SnatIp] {
+				localportrange = ginfo.PortRange
+			}
+			snatinfo.InterfaceName = agent.config.UplinkIface
+			snatinfo.InterfaceVlan = agent.config.ServiceVlan
+			if local[ginfo.SnatIp] {
+				snatinfo.PortRange = localportrange
+			}
+			snatinfo.Local = local[ginfo.SnatIp]
+			snatinfo.SnatIp = ginfo.SnatIp
+			snatinfo.Uuid = ginfo.SnatIpUid
+			snatinfo.Remote = remoteinfo
+			opflexSnatIps[ginfo.SnatIp] = &snatinfo
+			agent.log.Debug("Opflex Snat data IP: ", opflexSnatIps[ginfo.SnatIp])
+		}
 	}
 	agent.indexMutex.Unlock()
 	files, err := ioutil.ReadDir(agent.config.OpFlexSnatDir)
@@ -387,7 +428,7 @@ func (agent *HostAgent) syncSnat() bool {
 
 		snatfile := filepath.Join(agent.config.OpFlexSnatDir, f.Name())
 		logger := agent.log.WithFields(
-			logrus.Fields{"Uuid": uuid },)
+			logrus.Fields{"Uuid": uuid})
 		existing, ok := opflexSnatIps[uuid]
 		if ok {
 			fmt.Printf("snatfile:%s\n", snatfile)
@@ -396,9 +437,6 @@ func (agent *HostAgent) syncSnat() bool {
 				opflexSnatIpLogger(agent.log, existing).Error("Error writing snat file: ", err)
 			} else if wrote {
 				opflexSnatIpLogger(agent.log, existing).Info("Updated snat")
-			}
-			for poduuid, _ := range agent.localSnatPoduid[existing.SnatIp] {
-				agent.UpdateEpFile(poduuid, existing.SnatIp)
 			}
 			seen[uuid] = true
 		} else {
@@ -410,7 +448,6 @@ func (agent *HostAgent) syncSnat() bool {
 		if seen[snat.Uuid] {
 			continue
 		}
-
 		opflexSnatIpLogger(agent.log, snat).Info("Adding Snat")
 		snatfile :=
 			agent.FormSnatFilePath(snat.Uuid)
@@ -419,70 +456,7 @@ func (agent *HostAgent) syncSnat() bool {
 			opflexSnatIpLogger(agent.log, snat).
 				Error("Error writing snat file: ", err)
 		}
-		for poduuid, _ := range agent.localSnatPoduid[snat.SnatIp] {
-			agent.UpdateEpFile(poduuid, snat.SnatIp)
-		}
 	}
 	agent.log.Debug("Finished snat sync")
-	return false;
-}
-func (agent *HostAgent) UpdateEpFile(uuid string, snatip string) bool {
-
-	agent.log.Debug("Updating Ep file with snat ip:", snatip)
-	//agent.indexMutex.Lock()
-	opflexEps := make(map[string][]*opflexEndpoint)
-	for k, v := range agent.opflexEps {
-		opflexEps[k] = v
-	}
-	//agent.indexMutex.Unlock()
-	files, err := ioutil.ReadDir(agent.config.OpFlexEndpointDir)
-	if err != nil {
-		agent.log.WithFields(
-			logrus.Fields{"endpointDir": agent.config.OpFlexEndpointDir},
-		).Error("Could not read directory ", err)
-		return true
-	}
-	for _, f := range files {
-		if !strings.HasSuffix(f.Name(), ".ep") {
-			continue
-		}
-		epfile := filepath.Join(agent.config.OpFlexEndpointDir, f.Name())
-		epidstr := f.Name()
-		epidstr = epidstr[:len(epidstr)-3]
-		epid := strings.Split(epidstr, "_")
-
-		if len(epid) < 3 {
-			agent.log.Warn("Removing invalid endpoint:", f.Name())
-			os.Remove(epfile)
-			continue
-		}
-		poduuid := epid[0]
-		agent.log.Debug(uuid)
-		agent.log.Debug(poduuid)
-		if uuid != poduuid {
-			continue
-		}
-		existing, ok := opflexEps[poduuid]
-		if ok {
-			ok = false
-			for i, ep := range existing {
-				if ep.Uuid != epidstr {
-					continue
-				}
-				agent.opflexEps[poduuid][i].SnatIp = snatip
-				ep.SnatIp = snatip
-				wrote, err := writeEp(epfile, ep)
-				if err != nil {
-					opflexEpLogger(agent.log, ep).
-						Error("Error writing EP file: ", err)
-				} else if wrote {
-					opflexEpLogger(agent.log, ep).
-						Info("Updated endpoint")
-				}
-				ok = true
-			}
-		}
-	}
-	agent.log.Debug("Finished endpoint snatip sync")
 	return false
 }

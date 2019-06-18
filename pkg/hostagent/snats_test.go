@@ -29,53 +29,61 @@ import (
 
 	"github.com/noironetworks/aci-containers/pkg/metadata"
 	//md "github.com/noironetworks/aci-containers/pkg/metadata"
+	snatglobal "github.com/noironetworks/aci-containers/pkg/snatglobalinfo/apis/aci.snat/v1"
+	snatlocal "github.com/noironetworks/aci-containers/pkg/snatlocalinfo/apis/aci.snat/v1"
 	tu "github.com/noironetworks/aci-containers/pkg/testutil"
-	snatv1 "github.com/noironetworks/aci-containers/pkg/snatallocation/apis/aci.snat/v1"
 )
 
-type  portRange struct {
+type portRange struct {
 	start int
 	end   int
 }
 
-func snatdata(uuid string, poduuid string, namespace string, name string,
-ip string, mac string, port_range portRange, egAnnot string, sgAnnot string) *snatv1.SnatAllocation {
-	return &snatv1.SnatAllocation{
-		Spec: snatv1.SnatAllocationSpec{
-			Podname:  name,
-			Nodename: "test-node",
-			Snatportrange: snatv1.PortRange {
-				Start:  port_range.start,
-				End:   port_range.end,
-			},
-			Snatip: ip,
-			Macaddress: mac,
-			Poduid: poduuid,
-			Snatipuid: uuid,
+var LocalInfos map[string]snatlocal.LocalInfo
+
+func snatlocaldata(uuid string, poduuid string, namespace string, name string,
+	ip string) *snatlocal.SnatLocalInfo {
+	var localinfo snatlocal.LocalInfo
+	localinfo.SnatIp = ip
+	LocalInfos[poduuid] = localinfo
+	return &snatlocal.SnatLocalInfo{
+		Spec: snatlocal.SnatLocalInfoSpec{
+			Nodename:   "test-node",
+			LocalInfos: LocalInfos,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			UID:       apitypes.UID(uuid),
 			Namespace: namespace,
 			Name:      name,
-			Annotations: map[string]string{
-				metadata.EgAnnotation: egAnnot,
-				metadata.SgAnnotation: sgAnnot,
-			},
-			Labels: map[string]string{},
+			Labels:    map[string]string{},
+		},
+	}
+}
+func snatglobaldata(uuid string, name string, nodename string, namespace string, globalinfo []snatglobal.GlobalInfo) *snatglobal.SnatGlobalInfo {
+	GlobalInfos := make(map[string][]snatglobal.GlobalInfo, 10)
+	GlobalInfos[nodename] = globalinfo
+	return &snatglobal.SnatGlobalInfo{
+		Spec: snatglobal.SnatGlobalInfoSpec{
+			GlobalInfos: GlobalInfos,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			UID:       apitypes.UID(uuid),
+			Namespace: namespace,
+			Name:      name,
+			Labels:    map[string]string{},
 		},
 	}
 }
 
 type snatTest struct {
-	uuid      string
-	poduuid   string
-	namespace string
-	name      string
-	ip        string
-	mac       string
+	uuid       string
+	poduuid    string
+	namespace  string
+	name       string
+	ip         string
+	mac        string
 	port_range portRange
-	eg        string
-	sg        string
+	nodename   string
 }
 
 var snatTests = []snatTest{
@@ -84,11 +92,10 @@ var snatTests = []snatTest{
 		"730a8e7a-8455-4d46-8e6e-f4fdf0e3a667",
 		"testns",
 		"pod1",
-		"10.1.1.7",
+		"10.1.1.8",
 		"00:0c:29:92:fe:d0",
-		portRange {3000, 4000},
-		egAnnot,
-		sgAnnot,
+		portRange{4000, 5000},
+		"test-node",
 	},
 	{
 		"730a8e7a-8455-4d46-8e6e-n4fdf0e3a655",
@@ -97,9 +104,8 @@ var snatTests = []snatTest{
 		"pod2",
 		"10.1.1.8",
 		"00:0c:29:92:fe:d0",
-		portRange {4000, 5000},
-		egAnnot,
-		sgAnnot,
+		portRange{4000, 5000},
+		"test-node",
 	},
 	{
 		"730a8e7a-8455-4d46-8e6e-n4fdf0e3a655",
@@ -108,9 +114,8 @@ var snatTests = []snatTest{
 		"pod3",
 		"10.1.1.8",
 		"00:0c:29:92:fe:d0",
-		portRange {4000, 5000},
-		egAnnot,
-		sgAnnot,
+		portRange{4000, 5000},
+		"test-node",
 	},
 	{
 		"730a8e7a-8455-4d46-8e6e-n4fdf0e3a655",
@@ -118,10 +123,9 @@ var snatTests = []snatTest{
 		"testns",
 		"pod3",
 		"10.1.1.8",
-		"00:0c:29:92:fe:d0",
-		portRange {9000, 10000},
-		egAnnot,
-		sgAnnot,
+		"00:0c:29:92:fe:d1",
+		portRange{9000, 10000},
+		"test-node1",
 	},
 	{
 		"730a8e7a-8455-4d46-8e6e-n4fdf0e3a665",
@@ -129,23 +133,22 @@ var snatTests = []snatTest{
 		"testns",
 		"pod4",
 		"10.1.1.8",
-		"00:0c:29:92:fe:d0",
-		portRange {9000, 10000},
-		egAnnot,
-		sgAnnot,
+		"00:0c:29:92:fe:d3",
+		portRange{11000, 120000},
+		"test-node3",
 	},
 	/*
-	{
-		"",
-		"683c333d-a594-4f00-baa6-0d578a13d83a",
-		"testns",
-		"pod3",
-		"10.1.1.10",
-		"52:54:00:e5:26:57",
-		portRange {5000, 6000},
-		egAnnot,
-		sgAnnot,
-	},
+		{
+			"",
+			"683c333d-a594-4f00-baa6-0d578a13d83a",
+			"testns",
+			"pod3",
+			"10.1.1.10",
+			"52:54:00:e5:26:57",
+			portRange {5000, 6000},
+			egAnnot,
+			sgAnnot,
+		},
 	*/
 }
 
@@ -158,7 +161,7 @@ func (agent *testHostAgent) doTestSnat(t *testing.T, tempdir string,
 		func(last bool) (bool, error) {
 			var err error
 			snatfile := filepath.Join(tempdir,
-				pt.uuid + ".snat")
+				pt.uuid+".snat")
 			raw, err = ioutil.ReadFile(snatfile)
 			if !tu.WaitNil(t, last, err, desc, pt.name, "read snat") {
 				return false, nil
@@ -168,7 +171,7 @@ func (agent *testHostAgent) doTestSnat(t *testing.T, tempdir string,
 			return tu.WaitNil(t, last, err, desc, pt.name, "unmarshal snat"), nil
 		})
 	agent.log.Info("Snat Object added ", snat)
-	snatdstr := pt.uuid 
+	snatdstr := pt.uuid
 	assert.Equal(t, snatdstr, snat.Uuid, desc, pt.name, "uuid")
 	assert.Equal(t, pt.ip, snat.SnatIp, desc, pt.name, "ip")
 }
@@ -179,13 +182,15 @@ func TestSnatSync(t *testing.T) {
 		panic(err)
 	}
 	defer os.RemoveAll(tempdir)
-
+	LocalInfos = make(map[string]snatlocal.LocalInfo, 10)
 	agent := testAgent()
 	agent.config.OpFlexSnatDir = tempdir
 	agent.config.OpFlexEndpointDir = tempdir
-        agent.config.OpFlexServiceDir = tempdir
+	agent.config.OpFlexServiceDir = tempdir
 	agent.config.UplinkIface = "eth10"
-        agent.config.ServiceVlan = 4003
+	agent.config.NodeName = "test-node"
+	agent.config.ServiceVlan = 4003
+	agent.config.UplinkMacAdress = "5a:fd:16:e5:e7:c0"
 	agent.run()
 	for i, pt := range podTests {
 		if i%2 == 0 {
@@ -204,31 +209,88 @@ func TestSnatSync(t *testing.T) {
 		time.Sleep(1000 * time.Millisecond)
 		//agent.doTestPod(t, tempdir, &pt, "create")
 	}
+	var newglobal []snatglobal.GlobalInfo
+	var snatglobalinfo *snatglobal.SnatGlobalInfo
 	for i, pt := range snatTests {
 		if i%2 == 0 {
 			ioutil.WriteFile(filepath.Join(tempdir,
-				pt.uuid +".snat"),
+				pt.uuid+".snat"),
 				[]byte("random gibberish"), 0644)
 		}
 
-		snat := snatdata(pt.uuid, pt.poduuid, pt.namespace, pt.name, pt.ip, pt.mac, pt.port_range, pt.eg, pt.sg)
-	/*
-		cnimd := cnimd(pt.namespace, pt.name, pt.ip, pt.cont, pt.veth)
-		agent.epMetadata[pt.namespace+"/"+pt.name] =
-			map[string]*metadata.ContainerMetadata{
-				cnimd.Id.ContId: cnimd,
+		snatlocalinfo := snatlocaldata(pt.uuid, pt.poduuid, pt.namespace, pt.name, pt.ip)
+		portrange := make([]snatglobal.PortRange, 1)
+		portrange[0].Start = pt.port_range.start
+		var globalinfo snatglobal.GlobalInfo
+		portrange[0].End = pt.port_range.end
+		globalinfo.MacAddress = pt.mac
+		globalinfo.SnatIp = pt.ip
+		globalinfo.SnatIpUid = pt.uuid
+		globalinfo.PortRanges = portrange
+		if i == 0 {
+			newglobal = append(newglobal, globalinfo)
+		}
+		for _, v := range newglobal {
+			if v.SnatIp != pt.ip {
+				newglobal = append(newglobal, globalinfo)
 			}
-	*/
-		agent.fakeSnatSource.Add(snat)
+		}
+		snatglobalinfo = snatglobaldata(pt.uuid, pt.name, pt.nodename, pt.namespace, newglobal)
+		if i < 3 {
+			agent.fakeSnatLocalSource.Add(snatlocalinfo)
+		}
+		time.Sleep(3000 * time.Millisecond)
+		agent.fakeSnatGlobalSource.Add(snatglobalinfo)
 		agent.doTestSnat(t, tempdir, &pt, "create")
 	}
-	time.Sleep(3000 * time.Millisecond)
-	for _, pt := range snatTests {
-		snat := snatdata(pt.uuid, pt.poduuid, pt.namespace, pt.name, pt.ip, pt.mac, pt.port_range, pt.eg, pt.sg)
-		agent.fakeSnatSource.Add(snat)
-
+	var newglobal1 []snatglobal.GlobalInfo
+	for i, pt := range snatTests {
+		snatlocalinfo := snatlocaldata(pt.uuid, pt.poduuid, pt.namespace, pt.name, pt.ip)
+		portrange := make([]snatglobal.PortRange, 1)
+		portrange[0].Start = pt.port_range.start
+		var globalinfo snatglobal.GlobalInfo
+		portrange[0].End = pt.port_range.end
+		globalinfo.MacAddress = pt.mac
+		globalinfo.SnatIp = pt.ip
+		globalinfo.SnatIpUid = pt.uuid
+		globalinfo.PortRanges = portrange
+		if i == 0 {
+			newglobal1 = append(newglobal1, globalinfo)
+		}
+		for _, v := range newglobal {
+			if v.SnatIp != pt.ip {
+				newglobal1 = append(newglobal1, globalinfo)
+			}
+		}
+		snatglobalinfo = snatglobaldata(pt.uuid, pt.name, pt.nodename, pt.namespace, newglobal)
+		if i < 3 {
+			agent.fakeSnatLocalSource.Add(snatlocalinfo)
+		}
+		time.Sleep(3000 * time.Millisecond)
+		agent.fakeSnatGlobalSource.Add(snatglobalinfo)
 		agent.doTestSnat(t, tempdir, &pt, "update")
 	}
+	/*
+		time.Sleep(3000 * time.Millisecond)
+		var newglobal1 []snatglobal.GlobalInfo
+		for _, pt := range snatTests {
+			snatlocalinfo := snatlocaldata(pt.uuid, pt.poduuid, pt.namespace, pt.name, pt.ip)
+			portrange := make([]snatglobal.PortRange, 1)
+			portrange[0].Start = pt.port_range.start
+			portrange[0].End = pt.port_range.end
+			var globalinfo snatglobal.GlobalInfo
+			globalinfo.MacAddress = pt.mac
+			globalinfo.NodeName = "test-node"
+			globalinfo.SnatIpUid = pt.uuid
+			globalinfo.PortRanges = portrange
+			newglobal1 = append(newglobal1, globalinfo)
+			snatglobalinfo = snatglobaldata(pt.uuid, pt.name, pt.ip, pt.namespace, newglobal1)
+			agent.fakeSnatSource.Add(snatlocalinfo)
+			time.Sleep(3000 * time.Millisecond)
+			agent.fakeSnatSource.Add(snatglobalinfo)
+			agent.doTestSnat(t, tempdir, &pt, "update")
+		}
+	*/
 	time.Sleep(3000 * time.Millisecond)
 	for _, pt := range podTests {
 		pod := pod(pt.uuid, pt.namespace, pt.name, pt.eg, pt.sg)
@@ -240,17 +302,18 @@ func TestSnatSync(t *testing.T) {
 		agent.fakePodSource.Delete(pod)
 		time.Sleep(1000 * time.Millisecond)
 	}
-	for _, pt := range snatTests {
-		snat := snatdata(pt.uuid, pt.poduuid, pt.namespace, pt.name, pt.ip, pt.mac, pt.port_range, pt.eg, pt.sg)
-		agent.fakeSnatSource.Delete(snat)
+	/*
+		for _, pt := range snatTests {
+			agent.fakeSnatSource.Delete(snat)
 
-		tu.WaitFor(t, pt.name, 100*time.Millisecond,
-			func(last bool) (bool, error) {
-				snatfile := filepath.Join(tempdir,
-					pt.uuid+".snat")
-				_, err := ioutil.ReadFile(snatfile)
-				return tu.WaitNotNil(t, last, err, "snat deleted"), nil
-			})
-	}
+			tu.WaitFor(t, pt.name, 100*time.Millisecond,
+				func(last bool) (bool, error) {
+					snatfile := filepath.Join(tempdir,
+						pt.uuid+".snat")
+					_, err := ioutil.ReadFile(snatfile)
+					return tu.WaitNotNil(t, last, err, "snat deleted"), nil
+				})
+		}
+	*/
 	agent.stop()
 }

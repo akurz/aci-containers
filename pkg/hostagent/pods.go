@@ -55,7 +55,7 @@ type opflexEndpoint struct {
 	IfaceName         string `json:"interface-name,omitempty"`
 
 	Attributes map[string]string `json:"attributes,omitempty"`
-	SnatIp string   `json:"snat-ip,omitempty"`
+	SnatIp     string            `json:"snat-ip,omitempty"`
 }
 
 func (agent *HostAgent) initPodInformerFromClient(
@@ -192,22 +192,17 @@ func (agent *HostAgent) syncEps() bool {
 				if ep.Uuid != epidstr {
 					continue
 				}
-			/*
-			agent.indexMutex.Lock()
-			for _, v := range agent.OpflexSnatIps  {
-				for _, uuid := range v.PodUuids {
-					if  uuid == poduuid {
-						ep.SnatIp = v.SnatIp
-					}
-				}
-			}
-			agent.indexMutex.Unlock()
-			*/
 				agent.indexMutex.Lock()
-				for ip, v := range agent.localSnatPoduid {
-					if _, ok := v[poduuid]; ok {
-						ep.SnatIp = ip
-						break;
+				agent.log.Debug("snat local info", agent.opflexSnatLocalInfos)
+				for k, v := range agent.opflexSnatLocalInfos {
+					if k == poduuid {
+						if agent.opflexSnatLocalInfos[poduuid].MarkDelete == true {
+							delete(agent.opflexSnatLocalInfos, poduuid)
+							continue
+						}
+						ep.SnatIp = v.SnatIp
+						agent.log.Debug("ep updated with Snat IP", ep.SnatIp)
+						break
 					}
 				}
 				agent.indexMutex.Unlock()
