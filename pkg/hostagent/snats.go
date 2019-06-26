@@ -255,8 +255,13 @@ func (agent *HostAgent) snatLocalInfoChanged(snatobj interface{}, logger *logrus
 	if len(localInfo) < len(agent.opflexSnatLocalInfos) {
 		for poduid, v := range agent.opflexSnatLocalInfos {
 			if _, ok := localInfo[poduid]; !ok {
-				v.MarkDelete = true
-				syncep = true
+				// if pod present mark it snat ip deleted for local info
+				if _, ok := agent.opflexEps[poduid]; ok {
+					v.MarkDelete = true
+					syncep = true
+				} else {
+					delete(agent.opflexSnatLocalInfos, poduid)
+				}
 			}
 		}
 	}
@@ -342,21 +347,30 @@ func (agent *HostAgent) snatLocalInfoDelete(obj interface{}) {
 	agent.log.Debug("Snat Delete Obj")
 	snat := obj.(*snatlocal.SnatLocalInfo)
 	localInfo := snat.Spec.LocalInfos
+	syncep := false
 	for poduid, _ := range localInfo {
 		if _, ok := agent.opflexSnatLocalInfos[poduid]; ok {
-			agent.opflexSnatLocalInfos[poduid].MarkDelete = true
+			if _, ok := agent.opflexEps[poduid]; ok {
+				// if pod present mark it snat ip deleted for local info
+				agent.opflexSnatLocalInfos[poduid].MarkDelete = true
+				syncep = true
+			} else {
+				delete(agent.opflexSnatLocalInfos, poduid)
+			}
 		}
 	}
-	agent.scheduleSyncEps()
+	if syncep {
+		agent.scheduleSyncEps()
+	}
 }
 
 func (agent *HostAgent) snatGlobalInfoDelete(obj interface{}) {
 	agent.log.Debug("Snat Delete Obj")
 	snat := obj.(*snatglobal.SnatGlobalInfo)
 	globalInfo := snat.Spec.GlobalInfos
-	for snatip, _ := range globalInfo {
-		if _, ok := agent.opflexSnatGlobalInfos[snatip]; ok {
-			delete(agent.opflexSnatGlobalInfos, snatip)
+	for nodename, _ := range globalInfo {
+		if _, ok := agent.opflexSnatGlobalInfos[nodename]; ok {
+			delete(agent.opflexSnatGlobalInfos, nodename)
 		}
 	}
 	agent.scheduleSyncSnats()
